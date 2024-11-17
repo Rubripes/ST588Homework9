@@ -1,0 +1,614 @@
+---
+title: "ST588 Homework 9"
+author: "Matthew Bray"
+format: html
+editor: visual
+code-overflow: wrap
+---
+
+```{r setup, include=FALSE}
+#knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
+
+##HW 8: Basic Modeling Practice \### First order of business...load libraries that are needed for the project:
+
+```{r}
+library(readr)
+library(tidyverse)
+library(lubridate)
+library(gganimate)
+library(tidymodels)
+library(parsnip)
+library(glmnet)
+```
+
+### Reading Data
+
+We'll read in the data using `readr::read_csv`.
+
+```{r}
+data <- read_csv("SeoulBikeData.csv")
+```
+
+### EDA
+
+Next, we'll do some basic EDA...
+
+1)  Check for missingness by summing columns where the data `is.na`.
+
+```{r}
+colSums(is.na(data))
+```
+
+It appears there are no missing data.
+
+Next, we'll check the variable (column) types and see if the data make sense (numerical values have a rational mean and other stats), and that categorical variables have unique values.
+
+```{r}
+str(data)
+```
+
+The data appears "normal", except date is a character and hour appears like it could be a count. We can check the numeric variables by creating numeric summaries to see if they make sense. We'll use the `summary()` function to get 5 number summary for numeric values:
+
+```{r}
+summary(data)
+```
+
+This looks like hour is a real number and the view in the `str()` function output may have been coincidental, but I am still unsure what "hour" is. We can also look at the character variables to see how many unique values there may be in each category by creating frequency tables.
+
+```{r}
+table(data$Seasons)
+```
+
+Seasons look reasonable, there are the four standard seasons in roughly equal proportion.
+
+```{r}
+table(data$Holiday)
+```
+
+Holiday also appears reasonable, with the only two logical possibilities, and with fewer holidays than non-holidays, which is sadly the reality.
+
+```{r}
+data2 <- data |>
+  rename("functioningDay" = "Functioning Day")
+
+table(data2$functioningDay)
+```
+
+This seems to make sense, there are two classes.
+
+We'll next conver the date from a character variable to a date using `lubridate()`, turn the other character variables into factors, and rename all the variables for consistent naming. We'll use the `lubridate` package and the `dplyr` package.
+
+```{r}
+names(data)
+
+#rename using names()fuction to help with renaming non-standard variables
+names(data) <- c("date",
+                 "rentedBikeCount",
+                 "hour",
+                 "tempC",
+                 "humidityPct",
+                 "windM_S",
+                 "vis",
+                 "dewPointTempC",
+                 "solarRadiation",
+                 "rainfallmm",
+                 "snowfallcm",
+                 "seasons",
+                 "holiday",
+                 "functioningDay")
+#coerce date from chr to date formt using lubridate::dmy
+data$date <- dmy(data$date)
+
+#create list of variables to coerce to factors
+factors <- c("seasons", "holiday", "functioningDay")
+#coerce to factor using list above
+data3 <-data |>
+  mutate_at(factors, factor)
+#check to see conversions were successful
+head(data3)
+```
+
+The variable transformations were successful. Now, we'll move on with some more exploration of this updated data.
+
+##Summary Statistics Across Bike Rental Count and Categorical Variables: We'll start by grouping by `rentedBikeCount`:
+
+```{r}
+seasonsStat <- data3 |>
+  group_by(seasons) |>
+  summarise(
+    count = n(),
+    mean = mean(rentedBikeCount),
+    sd = sd(rentedBikeCount),
+    min = min(rentedBikeCount),
+    max = max(rentedBikeCount)
+  )
+seasonsStat
+```
+
+These statistics are a little difficult to make sense of because they represent the number of bikes rented per certain hour of each date within the corresponding season, these values do not represent the average number of bikes rented per season. However, it is intuitive that more bikes are rented per certain hour on a given date during the summer vs. winter, as the weather is typically more conducive to bike riding in the summer, thereby increasing demand.
+
+Are hours `1:24`?
+
+```{r}
+unique(data$hour)
+```
+
+Close...`0:23`. This looks like a 24 hour clock for tabulating a statndardized time window for rentals each day.
+
+Let's look at similar summary stats for other categorical groupings, starting with Holiday...
+
+```{r}
+holidayStat <- data3 |>
+  group_by(holiday) |>
+  summarise(
+    count = n(),
+    mean = mean(rentedBikeCount),
+    sd = sd(rentedBikeCount),
+    min = min(rentedBikeCount),
+    max = max(rentedBikeCount)
+  )
+holidayStat
+```
+
+...then Functioning Day:
+
+```{r}
+funDayStat <- data3 |>
+  group_by(functioningDay) |>
+  summarise(
+    count = n(),
+    mean = mean(rentedBikeCount),
+    sd = sd(rentedBikeCount),
+    min = min(rentedBikeCount),
+    max = max(rentedBikeCount)
+  )
+funDayStat
+```
+
+It looks like no bikes were rented on Non-functional days. I'm still not sure what a "Non-Functional" Day is, but we can remove the Non-Functioning Days from the dataset, since they don't provide much useful information other than people don't rent bikes on non-functional days.
+
+We'll subset the data to remove `"functioningDay" == "No"`.
+
+```{r}
+data4 <- data3 |>
+  filter(!functioningDay == "No")
+#check to make sure the correct values were removed:
+funDayStatYes <- data4 |>
+  group_by(functioningDay) |>
+  summarise(
+    count = n(),
+    mean = mean(rentedBikeCount),
+    sd = sd(rentedBikeCount),
+    min = min(rentedBikeCount),
+    max = max(rentedBikeCount)
+  )
+funDayStatYes
+```
+
+Ok, good news. The stats for `"functioningDay"` remain the same after subsetting.
+
+Next, we'll summarize across the hours so that each day has one observation associated with it.
+
+```{r}
+data5 <- data4 |>
+  group_by(date, seasons, holiday) |>
+  summarise(sumCount = sum(rentedBikeCount),
+            sumRain = sum(rainfallmm),
+            sumSnow = sum(snowfallcm),
+            meanTemp = mean(tempC),
+            meanHumidity = mean(humidityPct),
+            meanWind = mean(windM_S),
+            meanVis = mean(vis),
+            meanDP_C = mean(dewPointTempC),
+            meanSR = mean(solarRadiation))
+data5
+```
+
+We'll take this new summary dataset and calculate the same summary stats as before. By Season:
+
+```{r}
+seasonsStat1 <- data5 |>
+  group_by(seasons) |>
+  summarise(
+    count = n(),
+    mean = mean(sumCount),
+    sd = sd(sumCount),
+    min = min(sumCount),
+    max = max(sumCount)
+  )
+seasonsStat1
+```
+
+This must be a large city...36149 rentals in a single day is a lot of bikes!
+
+By Holiday:
+
+```{r}
+holidayStat1 <- data5 |>
+  group_by(holiday) |>
+  summarise(
+    count = n(),
+    mean = mean(sumCount),
+    sd = sd(sumCount),
+    min = min(sumCount),
+    max = max(sumCount)
+  )
+holidayStat1
+```
+
+There is a large difference in sample size between Holiday and No Holiday.
+
+### EDA Graphics
+
+Let's create some plots to help visualize the data.
+
+```{r}
+#plot snow vs. rain and color points by season.
+ggplot(data5, aes(sumRain, sumSnow, size = sumCount, colour = seasons)) +
+  geom_point(alpha = 0.7, show.legend = TRUE) +
+  scale_size(range = c(2, 12)) +
+  facet_wrap(~holiday) +
+  labs(title = 'Rain and Snow Impacts on Daily Rental Volume', x = 'Sum Daily Rain', y = 'Sum Daily Snow') 
+```
+
+It seems that snow does not have a lot of appeal for bike riding. Rain appears to be tolerable, but the decreasing size of the rental counts relative to increasing total daily rainfall makes sense...people just don't really want to get soaked while riding. There also are not many days where it both rains and snows. Snow seems to have the biggest impact on rental numbers in this visualization, and the trends hold between holidays and non-holidays.
+
+Next, let's look weather totals vs. rental volume seperately by rain or snow:
+
+```{r}
+#plot snow vs. rain and color points by season.
+ggplot(data5, aes(sumRain, sumCount, colour = seasons)) +
+  geom_point(alpha = 0.7, show.legend = TRUE) +
+  scale_size(range = c(2, 12)) +
+  labs(title = 'Rain Impacts on Daily Rental Volume', x = 'Sum Daily Rain', y = 'Daily Rental Volume') 
+```
+
+There is an apparent relationship between season and rental volume, with the warmer seasons (and dryer seasons/days) tending to exhibit the highest rental volume.
+
+What about snow only?
+
+```{r}
+ggplot(data5, aes(sumSnow, sumCount, colour = seasons)) +
+  geom_point(alpha = 0.7, show.legend = TRUE) +
+  scale_size(range = c(2, 12)) +
+  labs(title = 'Snow Impacts on Daily Rental Volume', x = 'Sum Daily Snow', y = 'Daily Rental Volume') 
+```
+
+It obviously doesn't snow much in the summer.... Appreciable snowfall depresses the rental volume quite a lot!
+
+## Split the Data
+
+We'll split the data into a training and test set (75/25). We'll use the `strata` argument to stratify the split on the `seasons` variable.
+
+First, we'll use the `initial_split()`, `training()`, and `testing()` functions to create the splits:
+
+```{r}
+set.seed(10)
+#create split with 75% data in training set and 25% in test set, and name the sets
+rental_split <- initial_split(data5, prop = 0.75, strata ="seasons")
+rental_train <- training(rental_split)
+rental_test <- testing(rental_split)
+rental_train
+```
+
+263/353 = \~ 75%, so that looks like we successfully created the right proportions for our training/test datasets.
+
+263 rows in the training dataset, which is not evenly divisible by 10. Each fold will have 26 observations, and one fold with have 29.
+
+```{r}
+#calculate fold size by dividing by number of folds (10)
+size_fold <- floor(nrow(rental_train)/10)
+size_fold
+```
+
+Next, we'll set a seed and randomly sample the folds into a list.
+
+```{r}
+set.seed(10)
+#randomly create starting indices for each fold
+random_indices <- sample(1:nrow(rental_train), size = nrow(rental_train), replace=FALSE)
+head(random_indices)
+```
+
+We can see above the first index of each fold.
+
+Next, we'll create a list in which to save our folds, then cycle through the random indices vector to place the observations from each fold in the list accordingly.
+
+```{r}
+folds <- list()
+
+for(i in 1:10){
+  if (i<10) {
+    fold_index <- seq(from = (i-1)*size_fold + 1, to = i*size_fold, by=1)
+    folds[[i]] <- rental_train[random_indices[fold_index], ]
+  } else {
+    fold_index <- seq(from = (i-1)*size_fold +1, to=length(random_indices), by =1)
+    folds[[i]] <- rental_train[random_indices[fold_index], ]
+  }
+}
+
+#check out the first fold:
+folds[[1]]
+```
+
+Let's check out the 10th fold...does it contain 29 observations?
+
+```{r}
+folds[[10]]
+```
+
+Yes! There are 29 observations in Fold #10!
+
+## Fitting MLR Models
+
+We'll create 3 recipes to preprocess the data...
+
+### Recipe 1
+
+We'll change the `role` of date, create a weekday/weekend factor variable from the date, standardize the numberic variables, and create dummy variables for `seasons`, `holiday`, and the new variables.
+
+```{r}
+bike_rec1 <- 
+  recipe(sumCount ~ ., data=rental_train) %>%
+  #change date to an ID role so that it is not included in fit, but is included in dataset
+  update_role(date, new_role = "ID") %>%
+  #change date to day of the week
+  step_mutate("date" = weekdays(date)) %>%
+  #transform day of week into week/weekend factor for inclusion in model fitting
+  step_mutate("date" = factor(if_else(date %in% c("Saturday", "Sunday"), "weekend", "weekday"))) %>%
+  #make all nominal predictors into dummy variables
+  step_dummy(all_nominal_predictors()) %>%
+  #cneter and scale numeric variables, except do not include dummy variables, dates, or outcomes
+  step_normalize(starts_with(c("sum", "mean")), -all_date_predictors(), -all_outcomes()) #%>%
+#  prep(training=rental_train) %>%
+#  bake(rental_train)
+
+#bike_rec1
+```
+
+We'll next create the same recipe, with interaction terms between seasons and holiday, seasons and temp, and temp and rainfall.
+
+```{r}
+bike_rec2 <- 
+  recipe(sumCount ~ ., data=rental_train) %>%
+  update_role(date, new_role = "ID") %>%
+  step_mutate("date" = weekdays(date)) %>%
+  step_mutate("date" = factor(if_else(date %in% c("Saturday", "Sunday"), "weekend", "weekday"))) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_normalize(starts_with(c("sum", "mean")), -all_date_predictors(), -all_outcomes()) %>%
+  step_interact(terms = ~ starts_with("seasons"):starts_with("holiday") + starts_with("seasons"):meanTemp + meanTemp:sumRain) #%>%
+#  prep(training=rental_train) %>%
+#  bake(rental_train)
+
+#bike_rec2
+```
+
+On to recipe three that includes quadratic terms:
+
+```{r}
+bike_rec3 <- 
+  recipe(sumCount ~ ., data=rental_train) %>%
+  update_role(date, new_role = "ID") %>%
+  step_mutate("date" = weekdays(date)) %>%
+  step_mutate("date" = factor(if_else(date %in% c("Saturday", "Sunday"), "weekend", "weekday"))) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_normalize(starts_with(c("sum", "mean")), -all_date_predictors(), -all_outcomes()) %>%
+  step_poly(all_numeric_predictors(), -starts_with(c("seasons", "holiday")), degree = 2) #%>%
+  #prep(training=rental_train) %>%
+  #bake(rental_train)
+
+#bike_rec3
+```
+
+Next, we'll create our model using the `lm` engine:
+
+```{r}
+rentalMod <- linear_reg() %>%
+  #use "lm", or linear model engine for model fitting
+  set_engine("lm")
+```
+
+Next, we'll create flow to fit the model and out put tidy estimates of the parameters:
+
+```{r}
+#create workflow for recipe 1 that starts with the recipe and fits the preprocessed data through the model engine specified in "rentalMod" object.
+rental_wfl_1 <- workflow() %>%
+  add_recipe(bike_rec1) %>%
+  add_model(rentalMod)
+#rental_wfl_1
+```
+
+Next well just fit Recipe 1 to test out our system:
+
+```{r}
+#this code initiates the fitting of the preprocessed data through the model on the training dataset
+rental_fit1 <- rental_wfl_1 %>%
+  fit(rental_train)
+rental_fit1 %>%
+  tidy()
+```
+
+We'll do 10 fold CV on the training data:
+
+```{r}
+#split the training dataset into 10 folds
+rental_10_fold <- vfold_cv(rental_train, 10)
+#resample each of the 10 folds and put the specified workflow
+rental_CV_fits_1 <- rental_wfl_1 %>%
+  fit_resamples(rental_10_fold)
+rental_CV_fits_1
+```
+
+Next we'll get the metrics:
+
+```{r}
+rental_CV_fits_1 %>%
+  collect_metrics()
+```
+
+Now, we'll repeat starting from the workflow step for each recipe. First, workflow for recipe 2, fit model, then do 10-fold CV on test dataset, then get metrics for each model:
+
+```{r}
+#create workflow for recipe 2
+rental_wfl_2 <- workflow() %>%
+  add_recipe(bike_rec2) %>%
+  add_model(rentalMod)
+rental_wfl_2
+
+#create workflow for recipe 3
+rental_wfl_3 <- workflow() %>%
+  add_recipe(bike_rec3) %>%
+  add_model(rentalMod)
+rental_wfl_3
+
+#fit model 2
+rental_fit2 <- rental_wfl_2 %>%
+  fit(rental_train)
+rental_fit2 %>%
+  tidy()
+
+#fit model 3
+rental_fit3 <- rental_wfl_3 %>%
+  fit(rental_train)
+rental_fit3 %>%
+  tidy()
+
+#10-fold CV recipe 2
+#rental_10_fold_2 <- vfold_cv(rental_train, 10)
+rental_CV_fits_2 <- rental_wfl_2 %>%
+  fit_resamples(rental_10_fold)
+rental_CV_fits_2
+
+#10-fold CV recipe 3
+#rental_10_fold_3 <- vfold_cv(rental_train, 10)
+rental_CV_fits_3 <- rental_wfl_3 %>%
+  fit_resamples(rental_10_fold)
+rental_CV_fits_3
+```
+
+Here, we'll display the metrics for recipe 2:
+
+```{r}
+rental_CV_fits_2 %>%
+  collect_metrics()
+```
+
+...And for recipe 3:
+
+```{r}
+rental_CV_fits_3 %>%
+  collect_metrics()
+```
+
+Recipe 2 has the lowest RMSE and highest R-squared.
+
+We'll use the "best" model on the test dataset and see how it fares:
+
+```{r}
+#use last_fit() function to collect metrics from recipe/model 2 and display
+testResults <- last_fit(rental_wfl_2, split = rental_split)
+collect_metrics(testResults)
+```
+
+RMSE for test dataset is 3339.891 with r-squared of 0.8928. These values seem to match closely to the estimates from the training dataset using recipe 2.
+
+
+## LASSO, Regression Tree, Bagged Tree, and Random Forest models:
+
+We'll start with the first model for Homework 9, the LASSO model. 
+
+We need to start with the recipe.  Since it is best to standardize the predictors for LASSO models, we'll create a similar recipe as for the previous LM recipes from homework 8 in which the numerical predictors were normlized.  We'll create the same three recipes to test the LASSO model family:
+
+
+```{r}
+#create the LASSO model specification using the glmnet engine
+LASSO_mod <- linear_reg(penalty = tune(), mixture = 1) %>%
+  set_engine("glmnet")
+```
+
+Next, we'll create the LASSO model workflows:
+```{r}
+LASSO_wfl_1 <- workflow() %>%
+  add_recipe(bike_rec1) %>%
+  add_model(LASSO_mod)
+LASSO_wfl_1
+
+LASSO_wfl_2 <- workflow() %>%
+  add_recipe(bike_rec2) %>%
+  add_model(LASSO_mod)
+LASSO_wfl_2
+
+LASSO_wfl_3 <- workflow() %>%
+  add_recipe(bike_rec3) %>%
+  add_model(LASSO_mod)
+LASSO_wfl_3
+```
+For the LASSO family, next, we'll fit the model using the `tune_grid` function:
+```{r}
+LASSO_grid_1 <- LASSO_wfl_1 %>%
+  tune_grid(resamples = rental_10_fold,
+            grid = grid_regular(penalty(), levels = 200))
+
+LASSO_grid_1
+```
+Let's show the LASSO penalty metrics:
+```{r}
+LASSO_grid_1[1, ".metrics"][[1]]
+```
+Then, we'll collect those metrics that include RMSE:
+```{r}
+LASSO_grid_1 %>%
+  collect_metrics() %>%
+  filter(.metric == "rmse")
+```
+Now we'll plot these metrics:
+```{r}
+LASSO_grid_1 %>% 
+  collect_metrics() %>%
+  filter(.metric == "rmse") %>%
+  ggplot(aes(penalty, mean, color = .metric)) +
+  geom_line() +
+  labs(title = "LASSO Model 1")
+```
+Let's repeat the LASSO steps for the models 2 and 3 (adding interaction and quadratic terms, respectively)
+```{r}
+LASSO_grid_2 <- LASSO_wfl_2 %>%
+  tune_grid(resamples = rental_10_fold,
+            grid = grid_regular(penalty(), levels = 200))
+
+LASSO_grid_2
+
+LASSO_grid_3 <- LASSO_wfl_3 %>%
+  tune_grid(resamples = rental_10_fold,
+            grid = grid_regular(penalty(), levels = 200))
+
+LASSO_grid_3
+```
+
+Let's show the LASSO penalty metrics for models 2...:
+```{r}
+LASSO_grid_2[1, ".metrics"][[1]]
+```
+...And let's show the LASSO penalty metrics for model 3:
+```{r}
+LASSO_grid_3[1, ".metrics"][[1]]
+```
+Next, we'll plot the penalties and RMSE values for LASSO Models 2 and 3:
+```{r}
+LASSO_grid_2 %>% 
+  collect_metrics() %>%
+  filter(.metric == "rmse") %>%
+  ggplot(aes(penalty, mean, color = .metric)) +
+  geom_line() +
+  labs(title = "LASSO Model 2")
+```
+```{r}
+LASSO_grid_3 %>% 
+  collect_metrics() %>%
+  filter(.metric == "rmse") %>%
+  ggplot(aes(penalty, mean, color = .metric)) +
+  geom_line() +
+  labs(title = "LASSO Model 3")
+```
+
