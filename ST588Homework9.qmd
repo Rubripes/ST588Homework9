@@ -7,7 +7,7 @@ code-overflow: wrap
 ---
 
 ```{r setup, include=FALSE}
-#knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
 ```
 
 ##HW 8: Basic Modeling Practice \### First order of business...load libraries that are needed for the project:
@@ -22,6 +22,7 @@ library(parsnip)
 library(glmnet)
 library(rpart.plot)
 library(baguette)
+library(ranger)
 ```
 
 ### Reading Data
@@ -505,12 +506,19 @@ rental_CV_fits_3 %>%
 
 Recipe 2 has the lowest RMSE and highest R-squared.
 
+We need to create a metric set using `yardstick::metric_set()` in order to specify the mae metrics to be output in all the models.
+```{r}
+final_metrics <- metric_set(rmse, mae)
+```
+
+
 We'll use the "best" model on the test dataset and see how it fares:
 
 ```{r}
 #use last_fit() function to collect metrics from recipe/model 2 and display
-testResults <- last_fit(rental_wfl_2, split = rental_split)
-collect_metrics(testResults)
+testResults <- last_fit(rental_wfl_2, split = rental_split, metrics = final_metrics)
+mle_metrics <- collect_metrics(testResults)
+mle_metrics
 ```
 
 RMSE for test dataset is 3339.891 with r-squared of 0.8928. These values seem to match closely to the estimates from the training dataset using recipe 2.
@@ -630,6 +638,22 @@ rbind(lowest_rmse_LASSO_1, lowest_rmse_LASSO_2, lowest_rmse_LASSO_3)
 ```
 Model 2 has the lowest RMSE, and the best LASSO model for model 2 aligns with the penalty of 1.
 
+Let's fit model 2 on our training set.
+```{r}
+LASSO_final <- LASSO_wfl_2 %>%
+  finalize_workflow(lowest_rmse_LASSO_2) %>%
+  fit(rental_train)
+tidy(LASSO_final)
+```
+Now, let's fit the LASSO model 2 on the test set:
+```{r}
+LASSO_test <- LASSO_wfl_2 %>%
+  finalize_workflow(lowest_rmse_LASSO_2) %>%
+  last_fit(rental_split, metrics = final_metrics) %>%
+  collect_metrics()
+
+```
+
 ## Regression Tree Model
 
 First, we'll do similar steps as for above models...we'll define the model engine and create a workflow for the Regression Tree model.  We will fit on recipes 1 and 3, as Regression Tree models already take interactions into account.
@@ -706,11 +730,13 @@ Now, we'll fit the best regression tree model on the test dataset:
 ```{r}
 #use last_fit()on rental_split
 tree_final_fit <- tree_final_wfl %>%
-  last_fit(rental_split)
+  last_fit(rental_split, metrics = final_metrics)
 
 #collect metrics on the final_fit on the test dataset:
-tree_final_fit %>%
+tree_final_metrics <- tree_final_fit %>%
   collect_metrics()
+
+tree_final_metrics
 ```
 Lastly, we'll plot the regression tree:
 ```{r}
@@ -756,7 +782,11 @@ bag_final_wfl <- bag_wfl %>%
   finalize_workflow(bag_best_params)
 
 bag_final_fit <- bag_final_wfl %>%
-  last_fit(rental_split)
+  last_fit(rental_split, metrics = final_metrics)
+
+bag_final_metrics <- bag_final_fit %>% collect_metrics()
+
+bag_final_metrics
 ```
 
 Now, we'll plot variable importance:
@@ -769,5 +799,98 @@ bag_final_model$imp %>%
   coord_flip()
 ```
 It Appears as if meanTemp is the most important predictor according to the Bagged Tree model.
+
+## On to Random Forest!
+Now we'll repeat the same steps as above to demonstrate the random forest model using the Tidymodels package.
+
+First, we'll specify the model engine.
+```{r}
+rf_mod <- rand_forest(mtry = tune()) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("regression")
+```
+
+Then, we'll create the Random Forest workflow:
+```{r}
+rf_wfl <- workflow() %>%
+  add_recipe(bike_rec1) %>%
+  add_model(rf_mod)
+```
+
+Now, fit the CV folds:
+```{r}
+rf_fit <- rf_wfl %>%
+  tune_grid(resamples = rental_10_fold,
+            grid = 7)
+```
+We'll select the best tuning parameter:
+```{r}
+rf_best_params <- select_best(rf_fit, metric="rmse")
+rf_best_params
+```
+Now...refit the test set with the best tuning parameter:
+```{r}
+rf_final_wfl <- rf_wfl %>%
+  finalize_workflow(rf_best_params)
+rf_final_fit <- rf_final_wfl %>%
+  last_fit(rental_split, metrics = final_metrics)
+
+rf_final_metrics <- rf_final_fit %>%
+  collect_metrics()
+rf_final_metrics
+```
+
+Now, we'll extract the fit engine and plot importance:
+```{r}
+rf_final_model <- extract_fit_engine(rf_final_fit)
+
+rf_importance <- as_tibble(stack(rf_final_model$variable.importance)) 
+
+
+names(rf_importance) <- c("value", "term")
+
+rf_importance <-arrange(rf_importance, ("value"))
+
+rf_importance %>%
+  mutate(term = fct_reorder(term, desc(value))) %>%
+  ggplot(aes(x=term, y=value, levels = term)) +
+  geom_bar(stat = "identity") +
+  coord_flip()
+```
+
+Now, let's compare all of the models and determine which is best using rmse and mae:
+```{r}
+#I somehow got "mlr" specified as "mle" throughout.  Correcting here in comparison table:
+mle_metrics$source <- "mlr"
+LASSO_test$source <- "LASSO"
+tree_final_metrics$source <- "regression_tree"
+bag_final_metrics$source <- "bagged_tree"
+rf_final_metrics$source <- "random_forest"
+
+comparison <- as_tibble(rbind(mle_metrics,
+      LASSO_test,
+      tree_final_metrics,
+      bag_final_metrics,
+      rf_final_metrics))
+
+comparison
+```
+It looks like the Bagged Tree is the best model on the test dataset.  The Bagged Tree model has the lowest rmse, and the second lowest MAE.  
+
+## Use `fit()` to fit best (Bagged Tree) to full dataset.
+Lastly, we'll fit the best model, the Bagged Tree model, on the entire Dataset!
+
+```{r}
+final_model <- bag_final_wfl %>%
+  fit(data5)
+final_model<- extract_fit_engine(final_model)
+final_model$imp %>%
+  mutate(term = factor(term, levels = term)) %>%
+  ggplot(aes(x=term, y=value, levels = term)) +
+  geom_bar(stat = "identity") +
+  coord_flip()
+```
+
+
 
 
