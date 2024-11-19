@@ -20,6 +20,8 @@ library(gganimate)
 library(tidymodels)
 library(parsnip)
 library(glmnet)
+library(rpart.plot)
+library(baguette)
 ```
 
 ### Reading Data
@@ -611,4 +613,161 @@ LASSO_grid_3 %>%
   geom_line() +
   labs(title = "LASSO Model 3")
 ```
+Next, we'll determine the tuning parameter that is associated with the best RMSE value and determine that model's coefficients using `select_best()` and `finalize_workflow` for each LASSO model.
+
+```{r}
+lowest_rmse_LASSO_1 <- LASSO_grid_1 %>%
+  select_best(metric = "rmse")
+
+lowest_rmse_LASSO_2 <- LASSO_grid_2 %>%
+  select_best(metric = "rmse")
+
+lowest_rmse_LASSO_3 <- LASSO_grid_3 %>%
+  select_best(metric = "rmse")
+
+rbind(lowest_rmse_LASSO_1, lowest_rmse_LASSO_2, lowest_rmse_LASSO_3)
+
+```
+Model 2 has the lowest RMSE, and the best LASSO model for model 2 aligns with the penalty of 1.
+
+## Regression Tree Model
+
+First, we'll do similar steps as for above models...we'll define the model engine and create a workflow for the Regression Tree model.  We will fit on recipes 1 and 3, as Regression Tree models already take interactions into account.
+```{r}
+#define model engine.
+tree_mod <- decision_tree(tree_depth = tune(),
+                          min_n = 20,
+                          cost_complexity = tune()) %>%
+  set_engine("rpart") %>%
+  set_mode("regression")
+
+#create workflow for each regression tree model:
+tree_wfl_1 <- workflow() %>%
+  add_recipe(bike_rec1) %>%
+  add_model(tree_mod)
+
+tree_wfl_2 <- workflow() %>%
+  add_recipe(bike_rec3) %>%
+  add_model(tree_mod)
+```
+
+Next, we'll create the tuning grid and specify number of each of tree_depth and cost_complexity values to tune to.
+```{r}
+tree_grid <- grid_regular(cost_complexity(),
+                           tree_depth(),
+                           levels = c(10,5))
+```
+
+Then, we'll use `tune_grid()` with the `tree_grid` object from above.
+```{r}
+tree_fits_1 <- tree_wfl_1 %>%
+  tune_grid(resamples = rental_10_fold,
+            grid = tree_grid)
+
+tree_fits_2 <- tree_wfl_2 %>%
+  tune_grid(resamples = rental_10_fold,
+            grid = tree_grid)
+```
+Then, we'll plot the `tree_fits_1` and... 
+```{r}
+tree_fits_1 %>%
+  collect_metrics() %>%
+  mutate(tree_depth = factor(tree_depth)) %>%
+  ggplot(aes(cost_complexity, mean, color = tree_depth)) +
+  geom_line(size = 1.0, alpha = 0.5) +
+  geom_point(size = 2) +
+  facet_wrap(~ .metric, scales = "free", nrow=2) +
+  scale_x_log10(labels = scales::label_number()) +
+  scale_color_viridis_d(option = "mako", begin = .9, end= 0)
+```
+...`tree_fits_2` metrics:
+```{r}
+tree_fits_2 %>%
+  collect_metrics() %>%
+  mutate(tree_depth = factor(tree_depth)) %>%
+  ggplot(aes(cost_complexity, mean, color = tree_depth)) +
+  geom_line(size = 1.0, alpha = 0.5) +
+  geom_point(size = 2) +
+  facet_wrap(~ .metric, scales = "free", nrow=2) +
+  scale_x_log10(labels = scales::label_number()) +
+  scale_color_viridis_d(option = "mako", begin = .9, end= 0)
+```
+It looks like the regression tree already accounts for the higher order variables, since both plots appear very similar.  This matches with what I've read in various descriptions of the technique.
+
+Now, we will `select_best` to get the best model's tuning parameters, then finalize the model and create a workflow that contains the best model with the lowest cost_complexity using `finalize_workflow`.
+```{r}
+tree_best_params <- select_best(tree_fits_1, metric = "rmse")
+
+tree_final_wfl <- tree_wfl_1 %>%
+  finalize_workflow(tree_best_params)
+```
+
+Now, we'll fit the best regression tree model on the test dataset:
+```{r}
+#use last_fit()on rental_split
+tree_final_fit <- tree_final_wfl %>%
+  last_fit(rental_split)
+
+#collect metrics on the final_fit on the test dataset:
+tree_final_fit %>%
+  collect_metrics()
+```
+Lastly, we'll plot the regression tree:
+```{r}
+tree_final_model <- extract_workflow(tree_final_fit)
+
+tree_final_model %>%
+  extract_fit_engine() %>%
+  rpart.plot::rpart.plot(roundint = FALSE)
+```
+## Bagged Tree Model
+Here we'll use specify a model engine, create a workflow, fit CV folds, check log_loss function, get best tuning parameter and refit on test dataset.
+
+First, specify model engine:
+```{r}
+bag_mod <- bag_tree(tree_depth = 5, min_n = 10, cost_complexity = tune()) %>%
+  set_engine("rpart") %>%
+  set_mode("regression")
+```
+
+Next, we'll creat the workflow for the Bagged Tree model:
+```{r}
+bag_wfl <- workflow() %>%
+  add_recipe(bike_rec1) %>%
+  add_model(bag_mod)
+```
+
+Next, fit the CV folds:
+```{r}
+bag_fit <- bag_wfl %>%
+  tune_grid(resamples = rental_10_fold,
+            grid=grid_regular(cost_complexity(),
+                              levels = 15)
+            )
+```
+Next, we'll select the best bagged tree model by using `select_best`:
+```{r}
+bag_best_params <- select_best(bag_fit, metric = "rmse")
+bag_best_params
+```
+Now, we'll fit on test dataset using the tuning parameter from above:
+```{r}
+bag_final_wfl <- bag_wfl %>%
+  finalize_workflow(bag_best_params)
+
+bag_final_fit <- bag_final_wfl %>%
+  last_fit(rental_split)
+```
+
+Now, we'll plot variable importance:
+```{r}
+bag_final_model <- extract_fit_engine(bag_final_fit)
+bag_final_model$imp %>%
+  mutate(term = factor(term, levels = term)) %>%
+  ggplot(aes(x=term, y=value, levels = term)) +
+  geom_bar(stat = "identity") +
+  coord_flip()
+```
+It Appears as if meanTemp is the most important predictor according to the Bagged Tree model.
+
 
